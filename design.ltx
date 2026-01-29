@@ -1,0 +1,139 @@
+% /home/connor/Projects/Cobol/GLE/design.ltx
+\documentclass[11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\geometry{margin=1in}
+\title{General Ledger Engine --- Design Deliverables}
+\date{}
+\begin{document}
+\maketitle
+
+\section*{Deliverables}
+- Chart of Accounts model (master file layout, hierarchy).\\
+- Transaction model (posting record, required fields).\\
+- File layout definitions (COBOL copybook style and byte offsets).\\
+- Processing model (online vs batch; posting & balancing).\\
+- Decisions (account numbering, sign convention, period format, currency precision).
+
+\section{Chart of Accounts Model}
+The system implements a hierarchical, 2-level design: Major (4 digits) + Sub (2 digits). Presentation format is XXXX-XX; storage is numeric 6 digits.\\
+Account attributes are: number (6N), name (up to 50A), type (Asset/Liability/Equity/Rev/Exp), normal balance (D/C), status (A/I), opening balance, currency.
+
+\subsection*{Account types and hierarchy}
+- Level 1: Major account (first 4 digits).\\
+- Level 2: Sub-account (last 2 digits).\\
+- Aggregation by prefix (first 4 digits) for roll-ups.
+
+\section{Transaction Model}
+Posting records contain the following fields:
+- Transaction-ID (alphanumeric, unique).\\
+- Posting-date (YYYYMMDD).\\
+- Period (YYYYMM).\\
+- Account-number (6N).\\
+- Amount (signed, stored in COMP-3, implied decimals).\\
+- DR/CR indicator (optional if amount signed).\\
+- Source-document-type/id.\\
+- Description (up to 80A).\\
+- Currency-code (ISO 3A).\\
+- Exchange-rate (if multi-currency).
+
+Posting semantics:
+- Each transaction is one line per account (multi-line journal entries are supported via group id). Amounts are signed; debits are positive, credits are negative. The DR/CR indicator is retained for audit purposes.
+
+\section{File Layout Definitions (COBOL/COPYBOOK style)}
+Master Account record (fixed length):
+\begin{verbatim}
+01  ACC-MASTER-REC.
+    05  ACC-NUM        PIC 9(6).             *> stored as 6 numeric digits (XXXXXX)
+    05  ACC-NAME       PIC X(50).
+    05  ACC-TYPE       PIC X(1).             *> A/L/E/R/X etc.
+    05  ACC-NORM-BAL   PIC X(1).             *> 'D' or 'C'
+    05  ACC-STATUS     PIC X(1).             *> 'A' or 'I'
+    05  ACC-OPEN-BAL   PIC S9(11)V99 COMP-3. *> signed, 2 implied decimals
+    05  ACC-CURRENCY   PIC X(3).             *> ISO code
+    05  FILLER         PIC X(17).
+\end{verbatim}
+
+Transaction record (fixed length):
+\begin{verbatim}
+01  GL-TRAN-REC.
+    05  TRAN-ID        PIC X(20).
+    05  TRAN-DATE      PIC 9(8).             *> YYYYMMDD
+    05  TRAN-PERIOD    PIC 9(6).             *> YYYYMM
+    05  ACC-NUM        PIC 9(6).
+    05  LINE-AMOUNT    PIC S9(11)V99 COMP-3. *> signed, 2 implied decimals
+    05  DRCR-IND       PIC X(1).             *> 'D'/'C' optional
+    05  CURR-CODE      PIC X(3).
+    05  EXCH-RATE      PIC 9(9)V9 COMP-3.   *> optional, implied 1 decimal
+    05  SRC-DOC-TYPE   PIC X(4).
+    05  SRC-DOC-ID     PIC X(20).
+    05  DESCRIPTION    PIC X(80).
+    05  FILLER         PIC X(18).
+\end{verbatim}
+
+Notes:
+- Fixed-length records are used for efficient batch I/O and simple COBOL serialization.
+- Record lengths are aligned to 256/512 bytes per platform requirements.
+
+\section{Processing Model (Online vs Batch)}
+
+\subsection{Online vs Batch}
+The system processes activities according to the following mode assignments:
+
+\begin{tabular}{ll}
+\hline
+Activity & Mode \\
+\hline
+Account maintenance & Online \\
+Journal entry & Online \\
+Posting & Batch \\
+Trial balance & Batch \\
+Period close & Batch \\
+\hline
+\end{tabular}
+
+\subsection{Online Processing}
+Account maintenance and journal entry are performed online:
+- Individual journal entries post immediately to GL with transactional locking on affected accounts/periods.
+- Account existence, period status, and currency rules are validated before commit.
+
+\subsection{Batch Processing}
+Posting, trial balance generation, and period close are performed in batch mode:
+- High-volume transactions (AP/AR loads, bank feeds) are processed in batch. Batch files contain GL transaction records as per the defined layout.
+- A pre-validation pass checks syntax, account existence, and period status before the posting phase applies transactions.
+- End-of-day checkpoints and journaling provide crash recovery capability.
+
+\subsection{Month-End Processing}
+Period close is a batch job that:
+- Verifies debits equal credits.
+- Produces the trial balance.
+- Runs reclassifications and posts closing entries.
+- Locks the period for online postings during the close process.
+
+\section{Decisions}
+- Account numbering: 6 digits numeric; presentation format is XXXX-XX (dash inserted in UI). This provides simple, sortable account numbers with easy roll-up capability.
+- Debit/credit sign convention: signed amounts are stored in COMP-3 format. Positive = Debit, Negative = Credit. The DR/CR indicator is maintained for audit and UI clarity.
+- Period format: YYYYMM (PIC 9(6)); posting dates are stored as YYYYMMDD (PIC 9(8)).
+- Currency precision: 2 decimals standard. Monetary fields are stored as COMP-3 packed decimal with 2 implied decimals, e.g. PIC S9(11)V99 COMP-3 for amounts up to 99,999,999,999.99.
+- File organization: fixed-length sequential files for batch; ISAM/VSAM or DB for online indexed lookup depending on platform.
+- Audit trail: every posting generates an audit record with before/after balances, operator id, timestamp, and source-doc info.
+
+\section*{Examples}
+- Example COBOL PIC for posting amount:
+\begin{verbatim}
+05  LINE-AMOUNT    PIC S9(11)V99 COMP-3.
+*> Holds values from -99999999999.99 to +99999999999.99
+\end{verbatim}
+
+- Period and date PICs:
+\begin{verbatim}
+05  TRAN-PERIOD    PIC 9(6).  *> YYYYMM
+05  TRAN-DATE      PIC 9(8).  *> YYYYMMDD
+\end{verbatim}
+
+\section*{Operational Notes}
+- Reconciliation: daily totals are maintained by period/account; batch rejects are placed in an error queue for operator review.\\
+- Performance: the posting critical path is kept tight; heavy reporting and roll-ups are offloaded to batch windows.\\
+- Localization: currency codes are specified per account and per transaction; exchange rates are applied at posting time; both base and transaction currency amounts are stored when multi-currency support is required.
+
+\end{document}
